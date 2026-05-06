@@ -127,8 +127,15 @@ class JointObjPartLoss(nn.Module):
 
         inst_loss = self._instance_consistency_loss(part_proj, z_part, part_valid_mask)
 
-        # Keep overlap off.
-        overlap_loss = zero
+        overlap_loss = (
+            self._soft_part_overlap_loss(
+                abs_logits=abs_logits,
+                obj_mask_patch=obj_mask_patch,
+                part_valid_mask=part_valid_mask,
+            )
+            if self.lambda_overlap > 0
+            else zero
+        )
 
         # New structure-preserving "Spearman-style" loss:
         #   1) keep the part-part text graph stable before/after projection
@@ -384,6 +391,38 @@ class JointObjPartLoss(nn.Module):
         if len(losses) == 0:
             return part_proj.new_tensor(0.0)
         return torch.stack(losses).mean()
+    
+    def _soft_part_overlap_loss(self, abs_logits, obj_mask_patch, part_valid_mask):
+        """
+        Penalize different parts attending to the same object patches.
+
+        abs_logits:       [B, K, N]
+        obj_mask_patch:   [B, N]
+        part_valid_mask:  [B, K]
+        """
+        if not part_valid_mask.any():
+            return abs_logits.new_tensor(0.0)
+
+        logits = abs_logits.masked_fill(~obj_mask_patch[:, None, :], -1e4)
+
+        # Per-part soft patch distribution inside object mask.
+        attn = F.softmax(logits, dim=-1)  # [B, K, N]
+        attn = attn * part_valid_mask[:, :, None].float()
+
+        # Pairwise overlap between part attention maps.
+        # overlap[b, k, l] is high if part k and part l attend to same patches.
+        overlap = torch.einsum("bkn,bln->bkl", attn, attn)  # [B, K, K]
+
+        B, K, _ = overlap.shape
+        valid_pair = part_valid_mask[:, :, None] & part_valid_mask[:, None, :]
+
+        eye = torch.eye(K, device=overlap.device, dtype=torch.bool)[None, :, :]
+        valid_pair = valid_pair & ~eye
+
+        if not valid_pair.any():
+            return abs_logits.new_tensor(0.0)
+
+        return overlap[valid_pair].mean()
 
     def _combined_structure_spearman_surrogate_loss(
         self,
