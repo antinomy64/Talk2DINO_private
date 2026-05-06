@@ -5,7 +5,5 @@ output
 output/eval
 configs
 segmentation_results
-anchor_point_pesudo_obj
-anchor_point_pesudo_part
+anchor_hit_region_audit
 anchor_point_pesudo_joint
-anchor_part_heatmaps_test7
