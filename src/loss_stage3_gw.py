@@ -59,68 +59,6 @@ def compute_relative_scores(local_scores: torch.Tensor) -> torch.Tensor:
     best_other = torch.where(is_top1, second_vals[None, :], best_vals[None, :])
     return local_scores - best_other
 
-
-@torch.no_grad()
-def select_anchor_tokens_from_logits(
-    patch_tokens: torch.Tensor,
-    abs_logits: torch.Tensor,
-    obj_mask_patch: torch.Tensor,
-    part_valid_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    
-    B, K, _ = abs_logits.shape
-    D = patch_tokens.shape[-1]
-    anchor_tokens = patch_tokens.new_zeros((B, K, D))
-    anchor_valid = torch.zeros((B, K), dtype=torch.bool, device=patch_tokens.device)
-
-    for b in range(B):
-        valid_patch_mask = obj_mask_patch[b]
-        valid_part_idx = torch.nonzero(part_valid_mask[b], as_tuple=False).squeeze(1)
-
-        if valid_part_idx.numel() == 0 or valid_patch_mask.sum() == 0:
-            continue
-
-        valid_patch_tokens = patch_tokens[b][valid_patch_mask]
-        local_scores = abs_logits[b][valid_part_idx][:, valid_patch_mask]
-
-        Kb, Mb = local_scores.shape
-        if Mb == 0:
-            continue
-
-        rel_scores = compute_relative_scores(local_scores)
-        flat_scores = rel_scores.reshape(-1)
-        sorted_idx = torch.argsort(flat_scores, descending=True)
-
-        anchor_idx_local = torch.full((Kb,), -1, dtype=torch.long, device=local_scores.device)
-        patch_taken = torch.zeros((Mb,), dtype=torch.bool, device=local_scores.device)
-
-        assigned_parts = 0
-        for flat_id in sorted_idx:
-            p_local = torch.div(flat_id, Mb, rounding_mode="floor")
-            n_local = flat_id % Mb
-
-            if anchor_idx_local[p_local] != -1:
-                continue
-            if patch_taken[n_local]:
-                continue
-
-            anchor_idx_local[p_local] = n_local
-            patch_taken[n_local] = True
-            assigned_parts += 1
-            if assigned_parts == Kb:
-                break
-
-        unassigned = torch.nonzero(anchor_idx_local < 0, as_tuple=False).squeeze(1)
-        if unassigned.numel() > 0:
-            local_best = rel_scores.argmax(dim=1)
-            anchor_idx_local[unassigned] = local_best[unassigned]
-
-        anchor_tokens[b, valid_part_idx] = valid_patch_tokens[anchor_idx_local]
-        anchor_valid[b, valid_part_idx] = True
-
-    return anchor_tokens, anchor_valid
-
-
 @torch.no_grad()
 def extract_z_part_from_batch(
     model: nn.Module,
@@ -153,14 +91,25 @@ def extract_z_part_from_batch(
         device=device,
     )
 
-    z_part, proto_part, anchor_metrics, anchor_tokens, anchor_valid = anchor_helper._anchor_proto_em_pool(
+    if return_anchor_tokens:
+        z_part, _, _, anchor_tokens, anchor_valid = anchor_helper._anchor_proto_em_pool(
+            patch_tokens=patch_tokens,
+            abs_logits=abs_logits,
+            obj_mask_patch=obj_mask_patch,
+            part_valid_mask=part_valid_mask,
+            part_gt_mask_patch=dummy_part_gt_mask_patch,
+            num_iters=em_iters,
+            return_anchor_tokens=True,
+        )
+        return z_part, anchor_tokens, anchor_valid
+
+    z_part, _, _ = anchor_helper._anchor_proto_em_pool(
         patch_tokens=patch_tokens,
         abs_logits=abs_logits,
         obj_mask_patch=obj_mask_patch,
         part_valid_mask=part_valid_mask,
         part_gt_mask_patch=dummy_part_gt_mask_patch,
         num_iters=em_iters,
-        return_anchor_tokens=True,
     )
 
     return z_part
