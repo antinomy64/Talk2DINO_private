@@ -162,6 +162,7 @@ def train_stage3_gw(
             f"train total={losses['total'].item():.4f} "
             f"obj={losses['obj'].item():.6f} "
             f"gw={losses['gw'].item():.4f}"
+            f"stru={losses['stru'].item():.4f}"
         )
         if do_anchor_audit:
             desc += f" anchor_post={losses['anchor_hit_rate_post'].item():.4f}"
@@ -186,22 +187,6 @@ def train_stage3_gw_global(
     steps_per_epoch: int = 1,
     audit_structure_every: int = 1,
 ):
-    """
-    Prototype-only GW training loop used when lambda_obj == 0.
-
-    It does NOT iterate over image batches and does NOT read patch tokens for
-    the training loss. Each step optimizes the same global objective:
-
-        total = lambda_gw * Lgw
-
-    where Lgw depends only on:
-      - the fixed 116 visual prototypes built once in Stage2,
-      - the fixed part text features in class_blocks,
-      - the current projector parameters.
-
-    If anchor hit is needed, run validate_stage3_gw(...) after the global step
-    or the standalone audit script; anchor hit necessarily needs image batches.
-    """
     model.train()
     running = []
     steps_per_epoch = max(1, int(steps_per_epoch))
@@ -261,6 +246,7 @@ def validate_stage3_gw(
             f"val total={losses['total'].item():.4f} "
             f"obj={losses['obj'].item():.6f} "
             f"gw={losses['gw'].item():.4f}"
+            f"stru={losses['stru'].item():.4f}"
         )
         if do_anchor_audit:
             desc += f" anchor_post={losses['anchor_hit_rate_post'].item():.4f}"
@@ -417,6 +403,7 @@ def do_train_stage3_gw(
 
     lambda_obj = float(train_cfg.get("lambda_obj", 600.0))
     lambda_gw = float(train_cfg.get("lambda_gw", 0.25))
+    lambda_struct = float(train_cfg.get("lambda_struct", 0.05))
     patch_temperature = float(train_cfg.get("patch_temperature", 0.07))
     em_iters = int(train_cfg.get("em_iters", 1))
     gw_epsilon = float(train_cfg.get("gw_epsilon", 0.05))
@@ -498,6 +485,7 @@ def do_train_stage3_gw(
         obj_max_violation=obj_max_violation,
         lambda_obj=lambda_obj,
         lambda_gw=lambda_gw,
+        lambda_struct=lambda_struct,
         gw_epsilon=gw_epsilon,
         gw_max_iter=gw_max_iter,
         sinkhorn_iter=sinkhorn_iter,
@@ -577,8 +565,11 @@ def do_train_stage3_gw(
         print(
             f"Epoch {epoch}: "
             f"train_total={train_metrics['total']:.4f}, "
+            f"train_gw={train_metrics.get('gw', 0.0):.4f}, "
+            f"train_struct={train_metrics.get('struct', 0.0):.4f}, "
             f"val_total={val_metrics['total']:.4f}, "
             f"val_gw={val_metrics.get('gw', 0.0):.4f}, "
+            f"val_struct={val_metrics.get('struct', 0.0):.4f}, "
             f"obj_eval_miou=skipped"
         )
 

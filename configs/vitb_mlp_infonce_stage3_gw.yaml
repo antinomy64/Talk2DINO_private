@@ -14,6 +14,7 @@ train:
 
   lambda_obj: 0.0
   lambda_gw: 1.0
+  lambda_struct: 0.05
 
   lambda_inst: 0.0
   lambda_overlap: 0.0

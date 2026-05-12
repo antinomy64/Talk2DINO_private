@@ -207,15 +207,6 @@ def build_stage2_visual_prototypes(
 
 
 def build_class_part_blocks_from_dataset(dataset, device: torch.device) -> List[Dict]:
-    """
-    Build one part block per object category from DinoClipJointDataset.data.
-
-    Each block contains the object category's complete part bank:
-      - part ids [K]
-      - pre-text part features [K, 512]
-
-    GW is computed separately within each block.
-    """
     blocks_by_cat = {}
 
     if not hasattr(dataset, "data"):
@@ -371,20 +362,6 @@ def structure_spearman(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def structure_retrieval_metric(feat_1: torch.Tensor, feat_2: torch.Tensor) -> torch.Tensor:
-    """
-    Structure retrieval metric matching metric.py::structure_retrieval(use_HM=False).
-
-    feat_1: [N, D1]
-    feat_2: [N, D2]
-
-    Steps:
-      1) Build cosine self-similarity matrices for feat_1 and feat_2.
-      2) Remove each diagonal, so each node is represented by its N-1 relations.
-      3) Row-center and row-normalize these relation vectors.
-      4) Compute cross-similarity between relation vectors.
-      5) For each feat_2 node/column, retrieve the most similar feat_1 node.
-         Count it correct iff the retrieved index equals the identity index.
-    """
     assert feat_1.shape[0] == feat_2.shape[0]
     n = feat_1.shape[0]
     if n <= 1:
@@ -417,17 +394,6 @@ def structure_retrieval_metric(feat_1: torch.Tensor, feat_2: torch.Tensor) -> to
 
 
 class Stage3GWLoss(nn.Module):
-    """
-    Stage 3 loss:
-        total = lambda_obj * Lo + lambda_gw * Lgw
-
-    Lo:
-        object-level InfoNCE through existing ContrastiveLoss.
-    Lgw:
-        per-object-class GW plan between pre-text part graph and visual prototype graph,
-        followed by soft alignment from projected text to matched visual prototypes.
-    """
-
     def __init__(
         self,
         sim_model: nn.Module,
@@ -438,6 +404,7 @@ class Stage3GWLoss(nn.Module):
         obj_max_violation: bool = True,
         lambda_obj: float = 600.0,
         lambda_gw: float = 0.25,
+        lambda_struct: float = 0.0,
         gw_epsilon: float = 0.05,
         gw_max_iter: int = 20,
         sinkhorn_iter: int = 50,
@@ -452,6 +419,7 @@ class Stage3GWLoss(nn.Module):
         self.class_blocks = class_blocks
         self.lambda_obj = float(lambda_obj)
         self.lambda_gw = float(lambda_gw)
+        self.lambda_struct = float(lambda_struct)
         self.gw_epsilon = float(gw_epsilon)
         self.gw_max_iter = int(gw_max_iter)
         self.sinkhorn_iter = int(sinkhorn_iter)
@@ -557,21 +525,52 @@ class Stage3GWLoss(nn.Module):
             return self.visual_proto.new_tensor(0.0)
 
         return torch.stack(losses).mean()
+    
+    def _struct_loss(self) -> torch.Tensor:
+        """
+        Preserve the intra-class part-text structure before and after projection.
+
+        For each object-class block:
+            S_pre  = cosine(part_text, part_text)
+            S_post = cosine(projector(part_text), projector(part_text))
+
+        Loss:
+            mean_{i<j} (S_post[i,j] - S_pre[i,j])^2
+        """
+        losses = []
+
+        for block in self.gw_blocks:
+            part_text = block["part_text"]  # [K, D]
+
+            if part_text.shape[0] < 2:
+                continue
+
+            text_pre = safe_normalize(part_text.float(), dim=-1)
+
+            text_post = self.sim_model.project_clip_txt(part_text)
+            text_post = safe_normalize(text_post.float(), dim=-1)
+
+            sim_pre = text_pre @ text_pre.T
+            sim_post = text_post @ text_post.T
+
+            k = sim_pre.shape[0]
+
+            idx = torch.triu_indices(k, k, offset=1, device=sim_pre.device)
+
+            vec_pre = sim_pre[idx[0], idx[1]].detach()
+            vec_post = sim_post[idx[0], idx[1]]
+
+            loss = F.mse_loss(vec_post, vec_pre)
+            losses.append(loss)
+
+        if len(losses) == 0:
+            device = next(self.sim_model.parameters()).device
+            return torch.tensor(0.0, device=device)
+
+        return torch.stack(losses).mean()
 
     @torch.no_grad()
     def _structure_audit(self) -> Dict[str, torch.Tensor]:
-        """
-        Minimal structure audit.
-
-        Kept metrics only:
-          - pre/post text vs visual Spearman over pairwise cosine structures
-          - pre/post text vs visual structure retrieval, using metric.py-style
-            structure_retrieval logic
-
-        pre  = unprojected CLIP part text features, part_ann_feats
-        post = projector(part_ann_feats)
-        V    = Stage2 global visual prototypes, sliced by object block
-        """
         values: Dict[str, List[torch.Tensor]] = {
             "audit_spear_pre_text_vs_visual": [],
             "audit_spear_post_text_vs_visual": [],
@@ -679,25 +678,14 @@ class Stage3GWLoss(nn.Module):
         self,
         do_structure_audit: bool = True,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Global prototype-only forward pass.
-
-        Use this when lambda_obj == 0. It does not require an image batch:
-          total = lambda_gw * Lgw
-
-        It can still report structure audit because that audit only depends on:
-          - fixed pre-text part features,
-          - fixed visual prototypes,
-          - current projector.
-
-        Anchor hit audit cannot be computed here because anchor hit requires
-        image patch tokens and part masks. Run validate_stage3_gw(...) or the
-        standalone audit script for anchor hit after this global update.
-        """
         device = self.visual_proto.device
-        gw_loss = self._gw_loss()
+
         obj_loss = torch.tensor(0.0, device=device)
-        total = self.lambda_gw * gw_loss
+        gw_loss = self._gw_loss()
+        struct_loss = self._struct_loss()
+
+        total = self.lambda_gw * gw_loss + self.lambda_struct * struct_loss
+
         zero = total.new_tensor(0.0)
         nan = total.new_tensor(float("nan"))
 
@@ -705,6 +693,7 @@ class Stage3GWLoss(nn.Module):
             "total": total,
             "obj": obj_loss.detach(),
             "gw": gw_loss.detach(),
+            "stru": struct_loss.detach(),
             "inst": zero.detach(),
             "overlap": zero.detach(),
             "spear": zero.detach(),
@@ -735,25 +724,23 @@ class Stage3GWLoss(nn.Module):
         do_anchor_audit: bool = False,
         do_structure_audit: bool = True,
     ) -> Dict[str, torch.Tensor]:
-        device = self.visual_proto.device
 
-        if self.lambda_obj > 0:
-            obj_feat = batch["obj_feat"]
-            obj_text_feat = batch["obj_text_feat"]
-            obj_loss = self.obj_criterion(
-                obj_feat,
-                obj_text_feat,
-                return_similarity_mat=False,
-                self_attn_maps=None,
-                cls=None,
-                text_input_mask=None,
-                text_argmax=None,
-            )
-        else:
-            obj_loss = torch.tensor(0.0, device=device)
+        obj_feat = batch["obj_feat"]
+        obj_text_feat = batch["obj_text_feat"]
 
+        obj_loss = self.obj_criterion(
+            obj_feat,
+            obj_text_feat,
+            return_similarity_mat=False,
+            self_attn_maps=None,
+            cls=None,
+            text_input_mask=None,
+            text_argmax=None,
+        )
         gw_loss = self._gw_loss()
-        total = self.lambda_obj * obj_loss + self.lambda_gw * gw_loss
+        struct_loss = self._struct_loss()
+
+        total = self.lambda_obj * obj_loss + self.lambda_gw * gw_loss + self.lambda_struct * struct_loss
         zero = total.new_tensor(0.0)
         nan = total.new_tensor(float("nan"))
 
@@ -761,6 +748,7 @@ class Stage3GWLoss(nn.Module):
             "total": total,
             "obj": obj_loss.detach(),
             "gw": gw_loss.detach(),
+            "stru": struct_loss.detach(),
             "inst": zero.detach(),
             "overlap": zero.detach(),
             "spear": zero.detach(),
