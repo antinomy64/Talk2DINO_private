@@ -528,14 +528,12 @@ class Stage3GWLoss(nn.Module):
     
     def _struct_loss(self) -> torch.Tensor:
         """
-        Preserve the intra-class part-text structure before and after projection.
+        Preserve intra-class part-text structure before and after projection.
 
-        For each object-class block:
-            S_pre  = cosine(part_text, part_text)
-            S_post = cosine(projector(part_text), projector(part_text))
+        S_pre[i,j]  = cos(t_i, t_j)
+        S_post[i,j] = cos(P(t_i), P(t_j))
 
-        Loss:
-            mean_{i<j} (S_post[i,j] - S_pre[i,j])^2
+        L_struct = mean_{i<j} (S_post[i,j] - S_pre[i,j])^2
         """
         losses = []
 
@@ -554,7 +552,6 @@ class Stage3GWLoss(nn.Module):
             sim_post = text_post @ text_post.T
 
             k = sim_pre.shape[0]
-
             idx = torch.triu_indices(k, k, offset=1, device=sim_pre.device)
 
             vec_pre = sim_pre[idx[0], idx[1]].detach()
@@ -564,8 +561,7 @@ class Stage3GWLoss(nn.Module):
             losses.append(loss)
 
         if len(losses) == 0:
-            device = next(self.sim_model.parameters()).device
-            return torch.tensor(0.0, device=device)
+            return self.visual_proto.new_tensor(0.0)
 
         return torch.stack(losses).mean()
 
@@ -693,7 +689,7 @@ class Stage3GWLoss(nn.Module):
             "total": total,
             "obj": obj_loss.detach(),
             "gw": gw_loss.detach(),
-            "stru": struct_loss.detach(),
+            "struct": struct_loss.detach(),
             "inst": zero.detach(),
             "overlap": zero.detach(),
             "spear": zero.detach(),
@@ -748,7 +744,7 @@ class Stage3GWLoss(nn.Module):
             "total": total,
             "obj": obj_loss.detach(),
             "gw": gw_loss.detach(),
-            "stru": struct_loss.detach(),
+            "struct": struct_loss.detach(),
             "inst": zero.detach(),
             "overlap": zero.detach(),
             "spear": zero.detach(),

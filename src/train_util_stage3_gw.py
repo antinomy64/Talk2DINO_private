@@ -161,8 +161,8 @@ def train_stage3_gw(
         desc = (
             f"train total={losses['total'].item():.4f} "
             f"obj={losses['obj'].item():.6f} "
-            f"gw={losses['gw'].item():.4f}"
-            f"stru={losses['stru'].item():.4f}"
+            f"gw={losses['gw'].item():.4f} "
+            f"struct={losses['struct'].item():.4f}"
         )
         if do_anchor_audit:
             desc += f" anchor_post={losses['anchor_hit_rate_post'].item():.4f}"
@@ -206,7 +206,7 @@ def train_stage3_gw_global(
         optimizer.step()
 
         running.append(losses)
-        desc = f"gw-only total={losses['total'].item():.4f} gw={losses['gw'].item():.4f}"
+        desc = f"gw-only total={losses['total'].item():.4f} gw={losses['gw'].item():.4f} struct={losses['struct'].item():.4f}"
         if do_structure_audit and "audit_spear_post_text_vs_visual" in losses:
             desc += (
                 f" spear_preV={losses['audit_spear_pre_text_vs_visual'].item():.3f}"
@@ -245,8 +245,8 @@ def validate_stage3_gw(
         desc = (
             f"val total={losses['total'].item():.4f} "
             f"obj={losses['obj'].item():.6f} "
-            f"gw={losses['gw'].item():.4f}"
-            f"stru={losses['stru'].item():.4f}"
+            f"gw={losses['gw'].item():.4f} "
+            f"struct={losses['struct'].item():.4f}"
         )
         if do_anchor_audit:
             desc += f" anchor_post={losses['anchor_hit_rate_post'].item():.4f}"
@@ -401,9 +401,9 @@ def do_train_stage3_gw(
     obj_margin = train_cfg.get("margin", 0.2)
     obj_max_violation = train_cfg.get("max_violation", True)
 
-    lambda_obj = float(train_cfg.get("lambda_obj", 600.0))
-    lambda_gw = float(train_cfg.get("lambda_gw", 0.25))
-    lambda_struct = float(train_cfg.get("lambda_struct", 0.05))
+    lambda_obj = float(train_cfg.get("lambda_obj", 0.0))
+    lambda_gw = float(train_cfg.get("lambda_gw", 0.0))
+    lambda_struct = float(train_cfg.get("lambda_struct", 0.0))
     patch_temperature = float(train_cfg.get("patch_temperature", 0.07))
     em_iters = int(train_cfg.get("em_iters", 1))
     gw_epsilon = float(train_cfg.get("gw_epsilon", 0.05))

@@ -82,10 +82,6 @@ def train_and_eval_stage3_gw(
         miou_eval_script=miou_eval_script,
         miou_eval_cfg=miou_eval_cfg,
         miou_eval_base_cfg=miou_eval_base_cfg,
-        miou_result_dir=miou_result_dir,
-        miou_result_json_name=miou_result_json_name,
-        miou_bench_key=miou_bench_key,
-        miou_extra_opts=miou_extra_opts,
     )
 
     torch.save(model.state_dict(), f"{out_path}.pth")
