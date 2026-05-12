@@ -6,36 +6,6 @@ from src.loss import ContrastiveLoss
 
 
 class JointObjPartLoss(nn.Module):
-    """
-    Joint loss for:
-      1) object-level branch: keep original contrastive objective
-      2) part-level branch: object-inside part supervision on patch tokens
-
-    Absolute-space anchor + prototype EM version:
-      - use ALL-PARTS bank from the dataset
-      - DO NOT build text/vision residuals
-      - DO NOT subtract object feature on either side
-      - find unique anchors on relative scores computed from absolute part-patch logits
-      - compute anchor hit metrics INSIDE forward
-      - use anchors only to initialize prototypes
-      - run prototype EM in the original projected patch-token space
-      - compute final part vision features by mean pooling original patch tokens
-
-    Spearman/structure regularization:
-      A) preserve text-side PART-PART graph structure before/after projection
-      B) preserve text-side PART-OBJ relation before/after projection
-
-      A) part-part graph
-         pre  graph: cosine(part_text_feat_i,  part_text_feat_j)
-         post graph: cosine(project(part_text_feat_i), project(part_text_feat_j))
-
-      B) part-obj relation
-         pre  relation: cosine(part_text_feat_i,  obj_text_feat)
-         post relation: cosine(project(part_text_feat_i), project(obj_text_feat))
-
-      The final spear loss is the mean of the two valid terms above.
-    """
-
     def __init__(
         self,
         sim_model,
@@ -195,6 +165,7 @@ class JointObjPartLoss(nn.Module):
         part_valid_mask,
         part_gt_mask_patch,
         num_iters=3,
+        return_anchor_tokens: bool = False,
     ):
         B, K, N = abs_logits.shape
         D = patch_tokens.shape[-1]
@@ -203,6 +174,9 @@ class JointObjPartLoss(nn.Module):
 
         total_valid_parts = patch_tokens.new_tensor(0.0)
         total_anchor_hits = patch_tokens.new_tensor(0.0)
+
+        anchor_tokens = patch_tokens.new_zeros((B, K, D))
+        anchor_valid = torch.zeros((B, K), dtype=torch.bool, device=patch_tokens.device)
 
         for b in range(B):
             valid_patch_mask = obj_mask_patch[b]
@@ -256,6 +230,8 @@ class JointObjPartLoss(nn.Module):
             total_anchor_hits += float(hit_vec.long().sum().item())
 
             C = valid_patch_tokens[anchor_idx_local]
+            anchor_tokens[b, valid_part_idx] = C
+            anchor_valid[b, valid_part_idx] = True
 
             assign = None
             for _ in range(max(int(num_iters), 1)):
@@ -284,6 +260,9 @@ class JointObjPartLoss(nn.Module):
             "anchor_total_valid_parts": total_valid_parts,
             "anchor_total_hits": total_anchor_hits,
         }
+        if return_anchor_tokens:
+            return z, proto_part, anchor_metrics, anchor_tokens, anchor_valid
+
         return z, proto_part, anchor_metrics
 
     def _instance_consistency_loss(self, part_proj, z_part, part_valid_mask):
