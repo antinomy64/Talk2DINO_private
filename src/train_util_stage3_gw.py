@@ -430,6 +430,7 @@ def do_train_stage3_gw(
         "[stage3 gw config] "
         f"lambda_obj={lambda_obj}, "
         f"lambda_gw={lambda_gw}, "
+        f"lambda_struct={lambda_struct}, "
         f"patch_temperature={patch_temperature}, "
         f"em_iters={em_iters}, "
         f"gw_epsilon={gw_epsilon}, "
