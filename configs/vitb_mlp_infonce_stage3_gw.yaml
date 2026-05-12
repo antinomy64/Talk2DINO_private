@@ -1,0 +1,41 @@
+model:
+  act: tanh
+  hidden_layer: True
+  dino_embed_dim: 768
+
+train:
+  lr: 0.00005
+  ltype: 'infonce'
+  num_epochs: 100
+  batch_size: 128
+  save_best_model: False
+  object_miou_max_drop: 2.0
+  select_best_by_miou: True
+
+  lambda_obj: 0.0
+  lambda_gw: 1.0
+
+  lambda_inst: 0.0
+  lambda_overlap: 0.0
+  lambda_spear: 0.0
+
+  patch_temperature: 0.07
+  em_iters: 1
+  num_parts: 116
+  min_proto_count: 1
+
+  # Stage2 visual prototype source:
+  #   zpart  = mean EM/region pooled pseudo z_part features
+  #   anchor = mean single selected anchor patch tokens
+  stage2_visual_source: anchor
+
+  gw_only_steps_per_epoch: 1
+  gw_epsilon: 0.05
+  gw_max_iter: 20
+  sinkhorn_iter: 50
+
+  audit_structure_every: 1
+  audit_anchor_every: 1
+
+dataset:
+  min_obj_area_ratio: 0.0
