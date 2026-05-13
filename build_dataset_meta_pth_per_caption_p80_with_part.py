@@ -233,8 +233,8 @@ def build_split(
         images.append(
             {
                 "id": len(images),
-                "file_name": os.path.relpath(image_path.resolve()),
-                "seg_file_name": os.path.relpath(mask_path.resolve()),
+                "file_name": str(image_path),
+                "seg_file_name": str(mask_path),
                 "split": split,
             }
         )
