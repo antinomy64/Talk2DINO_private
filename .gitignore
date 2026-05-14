@@ -6,3 +6,4 @@ output
 segmentation_results
 anchor_hit_region_audit
 anchor_point_pesudo_joint
+stage3_debug_viz_allblocks

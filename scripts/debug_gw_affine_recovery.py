@@ -1,5 +1,8 @@
 from pathlib import Path
 import sys
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -7,8 +10,6 @@ sys.path.insert(0, str(REPO_ROOT))
 import argparse
 import importlib
 import random
-from pathlib import Path
-import sys
 
 import numpy as np
 import torch
@@ -43,7 +44,7 @@ PATCH_SIZE = 14
 AFFINE_SCALE = 0.05
 AFFINE_BIAS = 0.0
 MIN_BLOCK_PARTS = 3       # skip k=2, because 2-point structures are permutation-ambiguous
-PRINT_EVERY = 50
+PRINT_EVERY = 1
 
 
 def set_seed(seed: int):
@@ -130,6 +131,7 @@ def make_fake_blocks(class_blocks, visual_proto, fake_text_dim: int):
         new_block = dict(block)
         new_block["part_ids"] = part_ids.detach()
         new_block["part_text"] = fake_local[perm].detach()
+        new_block["row_part_ids"] = part_ids[perm].detach()
         fake_blocks.append(new_block)
         true_match[int(block["category_id"])] = perm.detach()
 
@@ -185,6 +187,200 @@ def evaluate(criterion, projector, true_match, gw_max_iter: int, num_restarts: i
     }
 
 
+@torch.no_grad()
+def fit_block_pca_basis(V, Z, out_dim=2):
+    X = torch.cat([V.detach().float().cpu(), Z.detach().float().cpu()], dim=0)
+    mean = X.mean(dim=0, keepdim=True)
+    Xc = X - mean
+    _, _, Vh = torch.linalg.svd(Xc, full_matrices=False)
+    basis = Vh[:out_dim].T.contiguous()
+    return mean, basis
+
+
+@torch.no_grad()
+def project_2d(x, mean, basis):
+    x = x.detach().float().cpu()
+    return (x - mean) @ basis
+
+
+@torch.no_grad()
+def hard_bijective_cosine_match(Z: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
+    """Greedy one-to-one cosine matching.
+
+    Process Z rows in order. For each Z_i, choose the most similar V_j
+    that has not been used by previous rows. This is intentionally NOT
+    Hungarian/global-optimal matching; it is a row-order greedy cosine
+    bijection baseline for visualization.
+    """
+    sim = (Z @ V.T).detach().float().cpu()  # [K, K]
+    k = sim.shape[0]
+
+    pred = torch.empty(k, dtype=torch.long)
+    used_v = torch.zeros(k, dtype=torch.bool)
+
+    for i in range(k):
+        order = torch.argsort(sim[i], descending=True)
+        chosen = None
+        for j in order.tolist():
+            if not used_v[j]:
+                chosen = j
+                break
+        if chosen is None:
+            # Should not happen for square KxK matching, but keep it safe.
+            remaining = torch.where(~used_v)[0]
+            chosen = int(remaining[0].item())
+
+        pred[i] = chosen
+        used_v[chosen] = True
+
+    return pred
+
+
+def set_square_limits(ax, V2, Z2, pad_ratio=0.08):
+    """Use one square coordinate range for V/Z plots in the same block."""
+    pts = np.concatenate([V2, Z2], axis=0)
+    x_min, y_min = pts.min(axis=0)
+    x_max, y_max = pts.max(axis=0)
+
+    cx = 0.5 * (x_min + x_max)
+    cy = 0.5 * (y_min + y_max)
+    half = 0.5 * max(x_max - x_min, y_max - y_min)
+    half = max(half * (1.0 + pad_ratio), 1e-6)
+
+    ax.set_xlim(cx - half, cx + half)
+    ax.set_ylim(cy - half, cy + half)
+    ax.set_aspect("equal", adjustable="box")
+
+
+@torch.no_grad()
+def save_all_block_triplet_viz(criterion, projector, true_match, step, save_root, gw_max_iter, num_restarts):
+    save_root = Path(save_root)
+    step_dir = save_root / f"step_{step:04d}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+
+    for block_idx, block in enumerate(criterion.gw_blocks):
+        cat_id = int(block["category_id"])
+        if cat_id not in true_match:
+            continue
+
+        V = safe_normalize(block["visual"].float(), dim=-1)
+        T = block["part_text"].float()
+        Z = safe_normalize(projector.project_clip_txt(T), dim=-1)
+
+        v_part_ids = block["part_ids"].detach().cpu().tolist()
+        z_part_ids = block.get("row_part_ids", block["part_ids"]).detach().cpu().tolist()
+
+        C_z = pairwise_cosine_distance(Z)
+        C_v = pairwise_cosine_distance(V)
+        result = hard_bijective_gw_match(
+            C_z, C_v,
+            num_iters=gw_max_iter,
+            num_restarts=num_restarts,
+            include_identity=True,
+        )
+        pred = result[0] if isinstance(result, tuple) else result
+        pred = pred.detach().cpu().long()
+        target = true_match[cat_id].detach().cpu().long()
+
+        # Greedy feature-level cosine bijection: row-order greedy one-to-one Z_i -> V_j assignment.
+        # This is only for visualization, used to compare against hard-GW.
+        cos_bij = hard_bijective_cosine_match(Z, V).detach().cpu().long()
+
+        mean, basis = fit_block_pca_basis(V, Z)
+        V2 = project_2d(V, mean, basis).numpy()
+        Z2 = project_2d(Z, mean, basis).numpy()
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        ax1, ax2, ax3 = axes
+
+        label_box = dict(facecolor="white", edgecolor="none", alpha=0.70, pad=1.2)
+
+        ax1.scatter(V2[:, 0], V2[:, 1], s=80, c="blue")
+        for i, _pid in enumerate(v_part_ids):
+            ax1.text(
+                V2[i, 0], V2[i, 1], f"{i}",
+                fontsize=11, color="black", fontweight="bold",
+                ha="center", va="center", bbox=label_box,
+            )
+        ax1.set_title("V: true local id")
+        set_square_limits(ax1, V2, Z2)
+
+        ax2.scatter(Z2[:, 0], Z2[:, 1], s=80, c="red")
+        for i, _pid in enumerate(z_part_ids):
+            true_local_idx = int(target[i].item())
+            ax2.text(
+                Z2[i, 0], Z2[i, 1], f"{true_local_idx}",
+                fontsize=11, color="black", fontweight="bold",
+                ha="center", va="center", bbox=label_box,
+            )
+        ax2.set_title("Projected T: mapped-back true local id")
+        set_square_limits(ax2, V2, Z2)
+
+        ax3.scatter(V2[:, 0], V2[:, 1], s=80, c="blue", label="V")
+        ax3.scatter(Z2[:, 0], Z2[:, 1], s=80, c="red", label="Projected T")
+        for i, _pid in enumerate(v_part_ids):
+            ax3.text(
+                V2[i, 0], V2[i, 1], f"{i}",
+                fontsize=11, color="black", fontweight="bold",
+                ha="center", va="center", bbox=label_box,
+            )
+        for i, _pid in enumerate(z_part_ids):
+            true_local_idx = int(target[i].item())
+            ax3.text(
+                Z2[i, 0], Z2[i, 1], f"{true_local_idx}",
+                fontsize=11, color="black", fontweight="bold",
+                ha="center", va="center", bbox=label_box,
+            )
+
+        # Black lines: hard-GW bijective matching.
+        # Correct match rule: the black number at the red endpoint equals
+        # the black number at the blue endpoint.
+        n_correct = 0
+        for i in range(len(Z2)):
+            j = int(pred[i].item())
+            true_j = int(target[i].item())
+            n_correct += int(j == true_j)
+            ax3.plot(
+                [Z2[i, 0], V2[j, 0]],
+                [Z2[i, 1], V2[j, 1]],
+                linewidth=1.4,
+                c="black",
+                alpha=0.75,
+                label="hard-GW match" if i == 0 else None,
+            )
+
+        # Blue dashed lines: feature-level cosine bijection.
+        # Correct match rule is the same: the number at the red endpoint
+        # should equal the number at the blue endpoint.
+        n_cos_correct = 0
+        for i in range(len(Z2)):
+            j = int(cos_bij[i].item())
+            true_j = int(target[i].item())
+            n_cos_correct += int(j == true_j)
+            ax3.plot(
+                [Z2[i, 0], V2[j, 0]],
+                [Z2[i, 1], V2[j, 1]],
+                linewidth=1.1,
+                c="blue",
+                alpha=0.60,
+                linestyle="--",
+                label="greedy cosine" if i == 0 else None,
+            )
+
+        acc = n_correct / max(len(Z2), 1)
+        cos_acc = n_cos_correct / max(len(Z2), 1)
+        ax3.set_title(f"Overlay: black=hard-GW acc={acc:.3f}, blue dashed=greedy-cos acc={cos_acc:.3f}")
+        ax3.legend()
+        set_square_limits(ax3, V2, Z2)
+
+        class_name = block.get("class_name", str(cat_id))
+        fig.suptitle(f"step={step} | block={block_idx} | cat_id={cat_id} | class={class_name}")
+        plt.tight_layout()
+        out_path = step_dir / f"block_{block_idx:03d}_cat_{cat_id}.png"
+        plt.savefig(out_path, dpi=200)
+        plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_config", required=True)
@@ -195,6 +391,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--viz_dir", type=str, default="stage3_debug_viz")
+    parser.add_argument("--viz_block_idx", type=int, default=0)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -251,7 +449,7 @@ def main():
         min_proto_count=min_proto_count,
         proto_count=proto_count,
     ).to(device)
-    opt = torch.optim.AdamW(projector.parameters(), lr=1e-3)
+    opt = torch.optim.AdamW(projector.parameters(), lr=1e-4)
 
     def print_row(tag, losses=None):
         m = evaluate(criterion, projector, true_match, gw_max_iter, num_restarts)
@@ -262,14 +460,29 @@ def main():
                   f"Hacc={m['Hacc']:.3f} preV={m['preV']:.3e} postV={m['postV']:.3e} prepost={m['prepost']:.3e}")
 
     print_row("[before]")
+    save_all_block_triplet_viz(criterion, projector, true_match, 0, args.viz_dir, gw_max_iter, num_restarts)
+
     for step in tqdm(range(args.steps), desc="minimal-stage3-debug"):
         losses = criterion(batch=None, do_anchor_audit=False, do_structure_audit=False)
+
+        if step % PRINT_EVERY == 0 or step == args.steps - 1:
+            print_row(f"[step {step} before_update]", losses)
+
         opt.zero_grad(set_to_none=True)
         losses["total"].backward()
         opt.step()
 
         if step % PRINT_EVERY == 0 or step == args.steps - 1:
-            print_row(f"[step {step}]", losses)
+            print_row(f"[step {step} after_update]", None)
+            save_all_block_triplet_viz(
+                criterion,
+                projector,
+                true_match,
+                step + 1,
+                args.viz_dir,
+                gw_max_iter,
+                num_restarts,
+            )
 
 
 if __name__ == "__main__":

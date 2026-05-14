@@ -6,11 +6,9 @@ model:
 train:
   lr: 0.00005
   ltype: 'infonce'
-  num_epochs: 100
+  num_epochs: 30
   batch_size: 128
   save_best_model: False
-  object_miou_max_drop: 2.0
-  select_best_by_miou: True
 
   lambda_obj: 0.0
   lambda_gw: 1.0

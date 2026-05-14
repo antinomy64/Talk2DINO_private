@@ -1,13 +1,14 @@
 """
-Stage 3 hard-bijective GW structural loss for Talk2DINO.
+Stage 3 hard-bijective GW-matched point alignment for Talk2DINO.
 
 Final Stage3 objective implemented here:
 
     Z = projector(T)
 
-    L_gw     = hard-bijective GW structural loss between D(Z) and D(V)
-               The GW solver only chooses a hard permutation pi. The loss is
-                   mean_{i,k} (D(Z)[i,k] - D(V)[pi(i), pi(k)])^2
+    L_gw     = use hard-bijective GW to find a permutation pi between
+               D(Z) and D(V), then directly pull each projected text point
+               to its matched visual prototype:
+                   mean_i [1 - cos(Z_i, V_{pi(i)})]
 
     L_struct = structure preservation loss between projector input and output:
                    MSE(D(Z), D(T))
@@ -22,6 +23,8 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from tqdm import tqdm
 
 from src.loss import ContrastiveLoss
 from src.loss_joint import JointObjPartLoss
@@ -166,7 +169,7 @@ def build_stage2_visual_prototypes(
     ).to(device)
     anchor_helper.eval()
 
-    for batch in dataloader:
+    for batch in tqdm(dataloader, total=len(dataloader), desc="Build global visual prototypes"):
         moved = {}
         for key, value in batch.items():
             moved[key] = value.to(device) if torch.is_tensor(value) else value
@@ -234,7 +237,7 @@ def build_class_part_blocks_from_dataset(dataset, device: torch.device) -> List[
 
     data_iter = dataset.data.values() if isinstance(dataset.data, dict) else dataset.data
 
-    for sample in data_iter:
+    for sample in tqdm(data_iter, total=len(dataset.data), desc="Building class-part blocks"):
         category_id = int(sample["category_id"])
         if category_id in blocks_by_cat:
             continue
@@ -556,7 +559,7 @@ def structure_retrieval_metric(feat_1: torch.Tensor, feat_2: torch.Tensor) -> to
 class Stage3GWLoss(nn.Module):
     """
     Stage 3 loss with exactly two Stage3 terms:
-      1) hard-bijective GW structural alignment between projected T and V
+      1) hard-bijective GW-matched point alignment between projected T and V
       2) T-structure preservation before/after projection
 
     Object InfoNCE is kept only for backward compatibility with existing configs;
@@ -663,16 +666,19 @@ class Stage3GWLoss(nn.Module):
 
     def _gw_loss(self) -> torch.Tensor:
         """
-        Hard-bijective GW structural loss.
+        Hard-bijective GW-matched point alignment loss.
 
         For each block:
           Z = projector(T)
           C_z = D(Z)
           C_v = D(V)
           pi = hard_bijective_gw_match(C_z.detach(), C_v.detach())
-          loss = MSE(C_z, C_v[pi][:, pi])
 
-        No feature-level alignment, no soft transport, no weighted target.
+        Then use pi as hard pseudo correspondence and directly pull each
+        projected text point to its matched visual prototype:
+          loss = mean_i [1 - cos(Z_i, V_{pi(i)})]
+
+        No soft transport, no weighted target.
         """
         losses = []
 
@@ -695,8 +701,12 @@ class Stage3GWLoss(nn.Module):
                 include_identity=True,
             )
 
-            C_visual_perm = C_visual[perm][:, perm]
-            loss = F.mse_loss(C_proj, C_visual_perm)
+            # perm[i] = j means projected text row i is matched to visual row j.
+            # Use the GW correspondence as hard pseudo supervision:
+            # pull Z_i directly toward V_{perm[i]}.
+            matched_visual = visual[perm].detach()
+            loss = 1.0 - (projected_text * matched_visual).sum(dim=-1)
+            loss = loss.mean()
             losses.append(loss)
 
         if len(losses) == 0:

@@ -19,15 +19,6 @@ from tqdm import tqdm
 from transformers import Blip2Processor, Blip2ForConditionalGeneration, AddedToken
 
 import sys
-# Initialize global variables
-# feats = {}
-# num_global_tokens = 1
-# num_patch_tokens = 518 // 14 * 518 // 14
-# num_tokens = num_global_tokens + num_patch_tokens
-# embed_dim = 1024
-# num_attn_heads = 16
-# scale = 0.125
-# batch_size_ = 1
 def generate_caption(model, processor, images, prompt="a photography of"):
     image_token = AddedToken("<image>", normalized=False, special=True)
     processor.tokenizer.add_tokens([image_token], special_tokens=True)
@@ -154,7 +145,7 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
         ])
         num_attn_heads = model.num_heads
 
-    elif 'mae' in model_name or 'sam' in model_name or 'clip' in model_name or 'dino' in model_name or 'beit':
+    elif 'mae' in model_name or 'sam' in model_name or 'clip' in model_name or 'dino' in model_name or 'beit' in model_name:
         model = timm.create_model(
             model_name,
             pretrained=True,
@@ -170,7 +161,7 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
             num_patch_tokens = crop_dim // 16 * crop_dim // 16
             num_global_tokens = 5
             num_tokens = num_global_tokens + num_patch_tokens
-        elif 'mae' in model_name or 'dino' in model_name or 'beit':
+        elif 'mae' in model_name or 'dino' in model_name or 'beit' in model_name:
             num_patch_tokens = crop_dim // 16 * crop_dim // 16
             num_tokens = 1 + num_patch_tokens
         elif 'sam' in model_name:
