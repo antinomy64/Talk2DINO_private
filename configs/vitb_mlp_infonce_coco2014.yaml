@@ -1,5 +1,5 @@
 model:
-  act: tanh # None, tanh, relu or sigmoid
+  act: null # None, tanh, relu or sigmoid
   hidden_layer: True
   dino_embed_dim: 768
 

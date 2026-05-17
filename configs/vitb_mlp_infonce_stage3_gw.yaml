@@ -1,5 +1,5 @@
 model:
-  act: tanh
+  act: null
   hidden_layer: True
   dino_embed_dim: 768
 
@@ -12,7 +12,7 @@ train:
 
   lambda_obj: 0.0
   lambda_gw: 1.0
-  lambda_struct: 1.0
+  lambda_struct: 0.0
 
   lambda_inst: 0.0
   lambda_overlap: 0.0

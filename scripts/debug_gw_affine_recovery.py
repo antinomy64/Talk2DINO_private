@@ -41,10 +41,15 @@ CROP_DIM = 448
 PATCH_SIZE = 14
 
 # Debug fake-text settings.
-AFFINE_SCALE = 0.05
-AFFINE_BIAS = 0.0
+AFFINE_SCALE = 0.2
+AFFINE_BIAS = 0.03
 MIN_BLOCK_PARTS = 3       # skip k=2, because 2-point structures are permutation-ambiguous
 PRINT_EVERY = 1
+
+# Fixed PCA basis cache for visualization.
+# Without this, every step recomputes PCA from [V, Z], so V appears to move
+# even when the high-dimensional V features are fixed.
+PCA_CACHE = {}
 
 
 def set_seed(seed: int):
@@ -143,6 +148,7 @@ def evaluate(criterion, projector, true_match, gw_max_iter: int, num_restarts: i
     total = 0
     hit = 0
     gw_vals, pre_v_vals, post_v_vals, prepost_vals = [], [], [], []
+    pair_cos_pred_vals, pair_cos_true_vals = [], []
 
     for block in criterion.gw_blocks:
         cat_id = int(block["category_id"])
@@ -168,6 +174,12 @@ def evaluate(criterion, projector, true_match, gw_max_iter: int, num_restarts: i
         pred = result[0] if isinstance(result, tuple) else result
         pred = pred.to(V.device).long()
 
+        # Direct feature-level pull diagnostics:
+        #   pair_cos_pred: cosine to the current GW-matched target used by the loss
+        #   pair_cos_true: cosine to the known synthetic ground-truth target
+        pair_cos_pred_vals.append((Z * V[pred]).sum(dim=-1).mean().detach())
+        pair_cos_true_vals.append((Z * V[target]).sum(dim=-1).mean().detach())
+
         hit += int((pred == target).sum().item())
         total += int(k)
 
@@ -183,6 +195,8 @@ def evaluate(criterion, projector, true_match, gw_max_iter: int, num_restarts: i
         "preV": torch.stack(pre_v_vals).mean().item(),
         "postV": torch.stack(post_v_vals).mean().item(),
         "prepost": torch.stack(prepost_vals).mean().item(),
+        "pair_cos_pred": torch.stack(pair_cos_pred_vals).mean().item(),
+        "pair_cos_true": torch.stack(pair_cos_true_vals).mean().item(),
         "num_parts": total,
     }
 
@@ -253,7 +267,7 @@ def set_square_limits(ax, V2, Z2, pad_ratio=0.08):
 
 
 @torch.no_grad()
-def save_all_block_triplet_viz(criterion, projector, true_match, step, save_root, gw_max_iter, num_restarts):
+def save_all_block_triplet_viz(criterion, projector, true_match, step, save_root, gw_max_iter, num_restarts, pca_cache=None):
     save_root = Path(save_root)
     step_dir = save_root / f"step_{step:04d}"
     step_dir.mkdir(parents=True, exist_ok=True)
@@ -286,7 +300,18 @@ def save_all_block_triplet_viz(criterion, projector, true_match, step, save_root
         # This is only for visualization, used to compare against hard-GW.
         cos_bij = hard_bijective_cosine_match(Z, V).detach().cpu().long()
 
-        mean, basis = fit_block_pca_basis(V, Z)
+        # Keep a fixed 2D basis per block across steps.
+        # This makes V2 stable across saved figures and lets Z movement be visually meaningful.
+        cache_key = int(cat_id)
+        if pca_cache is not None:
+            if cache_key not in pca_cache:
+                mean, basis = fit_block_pca_basis(V, Z)
+                pca_cache[cache_key] = (mean, basis)
+            else:
+                mean, basis = pca_cache[cache_key]
+        else:
+            mean, basis = fit_block_pca_basis(V, Z)
+
         V2 = project_2d(V, mean, basis).numpy()
         Z2 = project_2d(Z, mean, basis).numpy()
 
@@ -388,12 +413,19 @@ def main():
     parser.add_argument("--init_weights", required=True)
     parser.add_argument("--visual_source", default="anchor", choices=["anchor", "zpart"])
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--debug_lr", type=float, default=3e-3, help="Learning rate for DebugProjector.")
+    parser.add_argument("--lambda_gw_override", type=float, default=None, help="Override lambda_gw for debug.")
+    parser.add_argument("--lambda_struct_override", type=float, default=None, help="Override lambda_struct for debug. Use 0.0 to verify pure pulling.")
+    parser.add_argument("--print_every", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--viz_dir", type=str, default="stage3_debug_viz")
     parser.add_argument("--viz_block_idx", type=int, default=0)
     args = parser.parse_args()
+
+    global PRINT_EVERY
+    PRINT_EVERY = max(1, int(args.print_every))
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -410,9 +442,18 @@ def main():
     em_iters = int(train_cfg.get("em_iters", 1))
     lambda_gw = float(train_cfg.get("lambda_gw", 1.0))
     lambda_struct = float(train_cfg.get("lambda_struct", 1.0))
+    if args.lambda_gw_override is not None:
+        lambda_gw = float(args.lambda_gw_override)
+    if args.lambda_struct_override is not None:
+        lambda_struct = float(args.lambda_struct_override)
     gw_max_iter = int(train_cfg.get("gw_max_iter", 20))
     num_restarts = int(train_cfg.get("sinkhorn_iter", 50))
     fake_text_dim = int(model_cfg.get("clip_embed_dim", 512))
+    print(
+        f"[debug config] lr={args.debug_lr} lambda_gw={lambda_gw} "
+        f"lambda_struct={lambda_struct} print_every={PRINT_EVERY} "
+        f"AFFINE_SCALE={AFFINE_SCALE} AFFINE_BIAS={AFFINE_BIAS}"
+    )
 
     dataset = build_dataset(args.train_dataset, cfg)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
@@ -449,18 +490,33 @@ def main():
         min_proto_count=min_proto_count,
         proto_count=proto_count,
     ).to(device)
-    opt = torch.optim.AdamW(projector.parameters(), lr=1e-4)
+    opt = torch.optim.AdamW(projector.parameters(), lr=args.debug_lr)
+    initial_weight = projector.proj.weight.detach().clone()
 
     def print_row(tag, losses=None):
         m = evaluate(criterion, projector, true_match, gw_max_iter, num_restarts)
         if losses is None:
-            print(f"{tag} Hacc={m['Hacc']:.3f} preV={m['preV']:.3e} postV={m['postV']:.3e} prepost={m['prepost']:.3e} parts={m['num_parts']}")
+            weight_delta = (projector.proj.weight.detach() - initial_weight).norm().item()
+            print(
+                f"{tag} Hacc={m['Hacc']:.3f} "
+                f"paircos_pred={m['pair_cos_pred']:.4f} paircos_true={m['pair_cos_true']:.4f} "
+                f"preV={m['preV']:.3e} postV={m['postV']:.3e} prepost={m['prepost']:.3e} "
+                f"wd={weight_delta:.3e} parts={m['num_parts']}"
+            )
         else:
-            print(f"{tag} total={losses['total'].item():.6f} gw={losses['gw'].item():.6f} struct={losses['struct'].item():.6f} "
-                  f"Hacc={m['Hacc']:.3f} preV={m['preV']:.3e} postV={m['postV']:.3e} prepost={m['prepost']:.3e}")
+            weight_delta = (projector.proj.weight.detach() - initial_weight).norm().item()
+            print(
+                f"{tag} total={losses['total'].item():.6f} "
+                f"gw={losses['gw'].item():.6f} struct={losses['struct'].item():.6f} "
+                f"Hacc={m['Hacc']:.3f} "
+                f"paircos_pred={m['pair_cos_pred']:.4f} paircos_true={m['pair_cos_true']:.4f} "
+                f"preV={m['preV']:.3e} postV={m['postV']:.3e} prepost={m['prepost']:.3e} "
+                f"wd={weight_delta:.3e}"
+            )
 
+    pca_cache = {}
     print_row("[before]")
-    save_all_block_triplet_viz(criterion, projector, true_match, 0, args.viz_dir, gw_max_iter, num_restarts)
+    save_all_block_triplet_viz(criterion, projector, true_match, 0, args.viz_dir, gw_max_iter, num_restarts, pca_cache=pca_cache)
 
     for step in tqdm(range(args.steps), desc="minimal-stage3-debug"):
         losses = criterion(batch=None, do_anchor_audit=False, do_structure_audit=False)
@@ -482,6 +538,7 @@ def main():
                 args.viz_dir,
                 gw_max_iter,
                 num_restarts,
+                pca_cache=pca_cache,
             )
 
 
