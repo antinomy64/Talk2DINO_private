@@ -1,0 +1,21 @@
+model:
+  act: tanh # None, tanh, relu or sigmoid
+  hidden_layer: True
+  dino_embed_dim: 768
+
+train:
+  lr: 0.0001
+  ltype: 'infonce'
+  num_epochs: 20
+  batch_size: 128
+  save_best_model: False
+
+  lambda_obj: 1200
+  lambda_inst: 0.4
+  lambda_overlap: 20.0
+  lambda_spear: 0.8
+  patch_temperature: 0.07
+  em_iters: 1
+  
+dataset:
+  min_obj_area_ratio: 0.0
