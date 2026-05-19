@@ -203,6 +203,7 @@ def evaluate_object_miou_subprocess(
     result_json_name: Optional[str] = None,
     bench_key: Optional[str] = None,
     extra_opts: Optional[List[str]] = None,
+    miou_eval_port: int = 29517,
 ):
     os.makedirs("weights", exist_ok=True)
     ckpt_path = os.path.join("weights", f"{proj_name}.pth")
@@ -213,7 +214,7 @@ def evaluate_object_miou_subprocess(
         "-m",
         "torch.distributed.run",
         "--nproc_per_node=1",
-        "--master_port=29517",
+        f"--master_port={miou_eval_port}",
         eval_script,
         "--eval",
         "--eval_cfg",
@@ -258,6 +259,7 @@ def do_train_joint(
     miou_result_json_name: Optional[str] = None,
     miou_bench_key: Optional[str] = None,
     miou_extra_opts: Optional[List[str]] = None,
+    miou_eval_port: int = 29517,
 ):
     device = next(model.parameters()).device
     set_seed(seed)
@@ -360,6 +362,7 @@ def do_train_joint(
         result_json_name=miou_result_json_name,
         bench_key=miou_bench_key,
         extra_opts=miou_extra_opts,
+        miou_eval_port=miou_eval_port,
     )
     baseline_obj_miou = baseline_obj_eval["obj_eval_miou"]
     print(f"[baseline object mIoU] miou={baseline_obj_miou:.4f}")
@@ -379,6 +382,7 @@ def do_train_joint(
             result_json_name=miou_result_json_name,
             bench_key=miou_bench_key,
             extra_opts=miou_extra_opts,
+            miou_eval_port=miou_eval_port,
         )
         obj_eval_metrics["obj_eval_miou_delta_vs_baseline"] = float(obj_eval_metrics["obj_eval_miou"] - baseline_obj_miou)
 

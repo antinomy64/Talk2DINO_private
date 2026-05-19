@@ -12,8 +12,8 @@ train:
 
   lambda_obj: 300
   lambda_inst: 1.0
-  lambda_overlap: 20.0
-  lambda_spear: 15.0
+  lambda_overlap: 25.0
+  lambda_spear: 20.0
   
 dataset:
   min_obj_area_ratio: 0.0

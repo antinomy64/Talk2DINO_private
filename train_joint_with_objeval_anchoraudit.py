@@ -31,6 +31,7 @@ def train_and_eval_joint(
     miou_result_json_name=None,
     miou_bench_key=None,
     miou_extra_opts=None,
+    miou_eval_port=29517,
 ):
     out_dir = 'weights'
     os.makedirs(out_dir, exist_ok=True)
@@ -75,6 +76,7 @@ def train_and_eval_joint(
         miou_result_json_name=miou_result_json_name,
         miou_bench_key=miou_bench_key,
         miou_extra_opts=miou_extra_opts,
+        miou_eval_port=miou_eval_port,
     )
 
     torch.save(model.state_dict(), f"{out_path}.pth")
@@ -116,6 +118,7 @@ if __name__ == '__main__':
     parser.add_argument('--miou_result_json_name', type=str, default=None)
     parser.add_argument('--miou_bench_key', type=str, default=None)
     parser.add_argument('--miou_extra_opts', nargs='*', default=None, help='Extra opts appended after model.proj_name=...')
+    parser.add_argument("--miou_eval_port", type=int, default=29517)
 
     args = parser.parse_args()
 
@@ -173,4 +176,5 @@ if __name__ == '__main__':
         miou_result_json_name=args.miou_result_json_name,
         miou_bench_key=args.miou_bench_key,
         miou_extra_opts=args.miou_extra_opts,
+        miou_eval_port=args.miou_eval_port,
     )
