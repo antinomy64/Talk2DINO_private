@@ -195,6 +195,7 @@ def _extract_miou_from_result_json(result_json_path: str, bench_key: Optional[st
 
 def evaluate_object_miou_subprocess(
     model,
+    proj_class: str,
     proj_name: str,
     eval_script: str,
     eval_cfg: str,
@@ -222,6 +223,7 @@ def evaluate_object_miou_subprocess(
         "--eval_base_cfg",
         eval_base_cfg,
         "--opts",
+        f"model.proj_class={proj_class}",
         f"model.proj_name={proj_name}",
     ]
     if extra_opts:
@@ -251,6 +253,7 @@ def do_train_joint(
     weight_decay: float = 0.05,
     scheduler_name: str = 'linear',
     warmup: int = 0,
+    eval_proj_class: str="",
     eval_proj_name: str = "",
     miou_eval_script: Optional[str] = None,
     miou_eval_cfg: Optional[str] = None,
@@ -354,6 +357,7 @@ def do_train_joint(
 
     baseline_obj_eval = evaluate_object_miou_subprocess(
         model=model,
+        proj_class=eval_proj_class,
         proj_name=eval_proj_name,
         eval_script=miou_eval_script,
         eval_cfg=miou_eval_cfg,
@@ -374,6 +378,7 @@ def do_train_joint(
 
         obj_eval_metrics = evaluate_object_miou_subprocess(
             model=model,
+            proj_class=eval_proj_class,
             proj_name=eval_proj_name,
             eval_script=miou_eval_script,
             eval_cfg=miou_eval_cfg,

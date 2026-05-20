@@ -1,21 +1,3 @@
-"""
-Stage 3 hard-bijective GW-matched point alignment for Talk2DINO.
-
-Final Stage3 objective implemented here:
-
-    Z = projector(T)
-
-    L_gw     = use hard-bijective GW to find a permutation pi between
-               D(Z) and D(V), then directly pull each projected text point
-               to its matched visual prototype:
-                   mean_i [1 - cos(Z_i, V_{pi(i)})]
-
-    L_struct = structure preservation loss between projector input and output:
-                   MSE(D(Z), D(T))
-
-    L_total  = lambda_obj * L_obj + lambda_gw * L_gw + lambda_struct * L_struct
-"""
-
 from __future__ import annotations
 
 from typing import Dict, List, Tuple

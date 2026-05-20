@@ -36,7 +36,8 @@ def train_and_eval_joint(
     out_dir = 'weights'
     os.makedirs(out_dir, exist_ok=True)
 
-    model_name = os.path.basename(config_file).split('.')[0]
+    proj_class = os.path.basename(config_file).split('.')[0]
+    model_name = proj_class
     if name_pedix:
         model_name += f"_{name_pedix}"
     out_path = os.path.join(out_dir, model_name)
@@ -68,6 +69,7 @@ def train_and_eval_joint(
         weight_decay=weight_decay,
         scheduler_name=scheduler,
         warmup=warmup,
+        eval_proj_class=proj_class,
         eval_proj_name=model_name,
         miou_eval_script=miou_eval_script,
         miou_eval_cfg=miou_eval_cfg,

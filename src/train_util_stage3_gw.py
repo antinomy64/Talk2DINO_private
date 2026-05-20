@@ -1,5 +1,3 @@
-"""Training utilities for Stage 3 GW refinement."""
-
 from __future__ import annotations
 
 from copy import deepcopy
