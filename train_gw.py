@@ -1,13 +1,3 @@
-"""Entry point for Stage 3 GW refinement.
-
-This script follows the same style as train_joint_with_objeval_anchoraudit.py:
-  - load DinoClipJointDataset
-  - create ProjectionLayer from config
-  - load init_weights
-  - build Stage 2 global visual prototypes in memory
-  - train Stage 3 with Lo + Lgw
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -19,13 +9,13 @@ import torch
 import yaml
 
 from src.dataset_joint_with_part_anchoraudit import DinoClipJointDataset
-from src.train_util_stage3_gw import do_train_stage3_gw
+from src.train_util_gw import do_train_gw
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def train_and_eval_stage3_gw(
+def train_and_eval_gw(
     config_file,
     train_dataset,
     val_dataset,
@@ -69,7 +59,7 @@ def train_and_eval_stage3_gw(
 
     print(model)
 
-    model, train_history, val_history = do_train_stage3_gw(
+    model, train_history, val_history = do_train_gw(
         model,
         train_dataset,
         val_dataset,
@@ -167,7 +157,7 @@ if __name__ == "__main__":
         min_obj_area_ratio=0.0,
     )
 
-    train_and_eval_stage3_gw(
+    train_and_eval_gw(
         args.model_config,
         train_dataset,
         val_dataset,

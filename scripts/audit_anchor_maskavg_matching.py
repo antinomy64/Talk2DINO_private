@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.dataset_joint_with_part_anchoraudit import DinoClipJointDataset, joint_collate_fn
 from src.loss_joint import JointObjPartLoss
-from src.loss_stage3_gw import (
+from src.loss_gw import (
     build_stage2_visual_prototypes,
     build_class_part_blocks_from_dataset,
     safe_normalize,

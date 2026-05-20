@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import src.loss_stage3_gw as lsgw
-from src.loss_stage3_gw import (
+import src.loss_gw as lsgw
+from src.loss_gw import (
     Stage3GWLoss,
     safe_normalize,
     pairwise_cosine_distance,

@@ -348,13 +348,6 @@ def improve_perm_by_pair_swaps(
     perm: torch.Tensor,
     max_passes: int = 10,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Greedy 2-swap local improvement for a hard GW permutation.
-
-    This is not brute-force enumeration over all permutations. It only checks
-    pair swaps around the current hard bijection and accepts swaps that reduce
-    the GW structural objective.
-    """
     best_perm = perm.detach().clone()
     best_obj = hard_gw_struct_objective(C1, C2, best_perm).detach()
     k = int(best_perm.numel())
@@ -386,17 +379,6 @@ def hard_bijective_gw_match(
     num_restarts: int = 50,
     include_identity: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Find a hard one-to-one GW permutation with iterative linearization + Hungarian.
-
-    This is not used as a feature-level alignment target. It is used only to
-    choose the permutation pi for the structural objective:
-        mean (C1 - C2[pi][:, pi])^2
-
-    Returns:
-        best_perm: [K], row i -> column best_perm[i]
-        best_obj:  scalar objective value under detached C1/C2
-    """
     if C1.shape != C2.shape:
         raise ValueError(f"Hard bijective GW expects same-size blocks, got {C1.shape} and {C2.shape}")
 
@@ -539,15 +521,6 @@ def structure_retrieval_metric(feat_1: torch.Tensor, feat_2: torch.Tensor) -> to
 
 
 class Stage3GWLoss(nn.Module):
-    """
-    Stage 3 loss with exactly two Stage3 terms:
-      1) hard-bijective GW-matched point alignment between projected T and V
-      2) T-structure preservation before/after projection
-
-    Object InfoNCE is kept only for backward compatibility with existing configs;
-    set lambda_obj=0.0 for GW-only Stage3.
-    """
-
     def __init__(
         self,
         sim_model: nn.Module,
@@ -605,7 +578,13 @@ class Stage3GWLoss(nn.Module):
 
     @torch.no_grad()
     def _prepare_gw_blocks(self) -> None:
-        """Cache per-object text/visual blocks only. Do not precompute transport."""
+        """
+        Cache per-object Stage3 blocks.
+
+        The important point is that Z0 and the GW permutation are computed once
+        at Stage3 initialization, using the Stage2-initialized projector. They
+        are then fixed during training.
+        """
         self.gw_blocks = []
 
         for block in self.class_blocks:
@@ -624,10 +603,30 @@ class Stage3GWLoss(nn.Module):
                     )
                     continue
 
-            visual = self.visual_proto[part_ids]
+            visual = safe_normalize(self.visual_proto[part_ids].float(), dim=-1)
             if not torch.isfinite(visual).all():
                 print(f"[Stage3GWLoss] skip block {block.get('class_name', '')}: non-finite visual proto")
                 continue
+
+            # Z0 is the Stage2 projected text representation.  This is the
+            # fixed structure template for the windmill-style Stage3 update.
+            z0 = self.sim_model.project_clip_txt(part_text)
+            z0 = safe_normalize(z0.float(), dim=-1)
+            if not torch.isfinite(z0).all():
+                print(f"[Stage3GWLoss] skip block {block.get('class_name', '')}: non-finite Z0")
+                continue
+
+            C_z0 = pairwise_cosine_distance(z0).detach()
+            C_visual = pairwise_cosine_distance(visual).detach()
+
+            # Fixed hard correspondence: text row i -> visual row perm[i].
+            perm, gw_obj = hard_bijective_gw_match(
+                C_z0,
+                C_visual,
+                num_iters=self.gw_max_iter,
+                num_restarts=max(1, self.sinkhorn_iter),
+                include_identity=True,
+            )
 
             self.gw_blocks.append(
                 {
@@ -636,60 +635,46 @@ class Stage3GWLoss(nn.Module):
                     "part_ids": part_ids.detach(),
                     "part_text": part_text.detach(),
                     "visual": visual.detach(),
+                    "z0": z0.detach(),
+                    "C_z0": C_z0.detach(),
+                    "gw_perm": perm.detach().long(),
+                    "gw_init_obj": gw_obj.detach() if torch.is_tensor(gw_obj) else torch.tensor(float(gw_obj), device=visual.device),
                 }
             )
 
         print(f"[Stage3GWLoss] valid GW blocks: {len(self.gw_blocks)}")
         for block in self.gw_blocks:
+            perm = block["gw_perm"]
             print(
                 f"  - {block['class_name']} "
-                f"category_id={block['category_id']} parts={block['part_ids'].numel()}"
+                f"category_id={block['category_id']} parts={block['part_ids'].numel()} "
+                f"fixed_gw_obj={float(block['gw_init_obj'].detach().cpu().item()):.6f} "
+                f"perm={perm.detach().cpu().tolist()}"
             )
 
     def _gw_loss(self) -> torch.Tensor:
         """
-        Hard-bijective GW-matched point alignment loss.
+        Fixed-GW-permutation matched feature alignment.
 
-        For each block:
-          Z = projector(T)
-          C_z = D(Z)
-          C_v = D(V)
-          pi = hard_bijective_gw_match(C_z.detach(), C_v.detach())
-
-        Then use pi as hard pseudo correspondence and directly pull each
-        projected text point to its matched visual prototype:
-          loss = mean_i [1 - cos(Z_i, V_{pi(i)})]
-
-        No soft transport, no weighted target.
+        The permutation is NOT recomputed from Zt. It was computed once from
+        D(Z0) and D(V) in _prepare_gw_blocks(). During training this term only
+        pulls current projected text Zt_i toward its fixed matched visual anchor
+        prototype V_{P[i]}.
         """
         losses = []
 
         for block in self.gw_blocks:
             part_text = block["part_text"]
             visual = block["visual"]
+            perm = block["gw_perm"]
 
             projected_text = self.sim_model.project_clip_txt(part_text)
             projected_text = safe_normalize(projected_text, dim=-1)
             visual = safe_normalize(visual, dim=-1)
 
-            C_proj = pairwise_cosine_distance(projected_text)
-            C_visual = pairwise_cosine_distance(visual).detach()
-
-            perm, _ = hard_bijective_gw_match(
-                C_proj.detach(),
-                C_visual,
-                num_iters=self.gw_max_iter,
-                num_restarts=max(1, self.sinkhorn_iter),
-                include_identity=True,
-            )
-
-            # perm[i] = j means projected text row i is matched to visual row j.
-            # Use the GW correspondence as hard pseudo supervision:
-            # pull Z_i directly toward V_{perm[i]}.
             matched_visual = visual[perm].detach()
             loss = 1.0 - (projected_text * matched_visual).sum(dim=-1)
-            loss = loss.mean()
-            losses.append(loss)
+            losses.append(loss.mean())
 
         if len(losses) == 0:
             return self.visual_proto.new_tensor(0.0)
@@ -697,7 +682,13 @@ class Stage3GWLoss(nn.Module):
         return torch.stack(losses).mean()
 
     def _struct_loss(self) -> torch.Tensor:
-        """Preserve T structure after projection: MSE(D(projector(T)), D(T))."""
+        """
+        Preserve the Stage2 projected structure: MSE(D(Zt), D(Z0)).
+
+        This is the windmill-shape constraint. It does not preserve raw text
+        feature geometry D(T); it preserves the initial projected geometry D(Z0)
+        computed from the Stage2 checkpoint.
+        """
         losses = []
 
         for block in self.gw_blocks:
@@ -708,9 +699,9 @@ class Stage3GWLoss(nn.Module):
             projected_text = self.sim_model.project_clip_txt(part_text)
             projected_text = safe_normalize(projected_text, dim=-1)
 
-            C_pre = pairwise_cosine_distance(part_text).detach()
+            C_z0 = block["C_z0"].detach()
             C_post = pairwise_cosine_distance(projected_text)
-            losses.append(F.mse_loss(C_post, C_pre))
+            losses.append(F.mse_loss(C_post, C_z0))
 
         if len(losses) == 0:
             return self.visual_proto.new_tensor(0.0)
@@ -719,38 +710,84 @@ class Stage3GWLoss(nn.Module):
 
     @torch.no_grad()
     def _structure_audit(self) -> Dict[str, torch.Tensor]:
+        """
+        Structure diagnostics for fixed-Z0 Stage3.
+
+        Main quantities:
+          - z0_vs_visual: Stage2 initial projected text structure vs visual.
+          - post_vs_visual: current projected text structure vs visual.
+          - post_vs_z0: whether current projected text keeps the Z0 structure.
+          - post_vs_visual_perm: same as post_vs_visual but with V ordered by fixed GW P.
+        """
         values: Dict[str, List[torch.Tensor]] = {
-            "audit_spear_pre_text_vs_visual": [],
-            "audit_spear_post_text_vs_visual": [],
-            "audit_strret_pre_text_vs_visual": [],
-            "audit_strret_post_text_vs_visual": [],
+            "audit_spear_z0_vs_visual": [],
+            "audit_spear_post_vs_visual": [],
+            "audit_spear_post_vs_z0": [],
+            "audit_spear_z0_vs_visual_perm": [],
+            "audit_spear_post_vs_visual_perm": [],
+            "audit_strret_z0_vs_visual": [],
+            "audit_strret_post_vs_visual": [],
+            "audit_strret_post_vs_z0": [],
+            "audit_strret_z0_vs_visual_perm": [],
+            "audit_strret_post_vs_visual_perm": [],
+            "audit_fixed_gw_obj_z0": [],
+            "audit_current_gw_obj_fixed_perm": [],
         }
 
         for block in self.gw_blocks:
             part_text = block["part_text"]
             visual = safe_normalize(block["visual"], dim=-1)
+            z0 = safe_normalize(block["z0"], dim=-1)
+            perm = block["gw_perm"]
+            visual_perm = visual[perm]
             if part_text.shape[0] < 2:
                 continue
 
-            pre_text = safe_normalize(part_text.float(), dim=-1)
             post_text = self.sim_model.project_clip_txt(part_text)
             post_text = safe_normalize(post_text.float(), dim=-1)
 
-            sim_pre = pairwise_cosine_similarity(pre_text)
+            sim_z0 = pairwise_cosine_similarity(z0)
             sim_post = pairwise_cosine_similarity(post_text)
             sim_vis = pairwise_cosine_similarity(visual)
+            sim_vis_perm = pairwise_cosine_similarity(visual_perm)
 
-            values["audit_spear_pre_text_vs_visual"].append(
-                spearman_corr_torch(upper_tri_vector(sim_pre), upper_tri_vector(sim_vis))
+            values["audit_spear_z0_vs_visual"].append(
+                spearman_corr_torch(upper_tri_vector(sim_z0), upper_tri_vector(sim_vis))
             )
-            values["audit_spear_post_text_vs_visual"].append(
+            values["audit_spear_post_vs_visual"].append(
                 spearman_corr_torch(upper_tri_vector(sim_post), upper_tri_vector(sim_vis))
             )
-            values["audit_strret_pre_text_vs_visual"].append(
-                structure_retrieval_metric(pre_text, visual)
+            values["audit_spear_post_vs_z0"].append(
+                spearman_corr_torch(upper_tri_vector(sim_post), upper_tri_vector(sim_z0))
             )
-            values["audit_strret_post_text_vs_visual"].append(
+            values["audit_spear_z0_vs_visual_perm"].append(
+                spearman_corr_torch(upper_tri_vector(sim_z0), upper_tri_vector(sim_vis_perm))
+            )
+            values["audit_spear_post_vs_visual_perm"].append(
+                spearman_corr_torch(upper_tri_vector(sim_post), upper_tri_vector(sim_vis_perm))
+            )
+
+            values["audit_strret_z0_vs_visual"].append(
+                structure_retrieval_metric(z0, visual)
+            )
+            values["audit_strret_post_vs_visual"].append(
                 structure_retrieval_metric(post_text, visual)
+            )
+            values["audit_strret_post_vs_z0"].append(
+                structure_retrieval_metric(post_text, z0)
+            )
+            values["audit_strret_z0_vs_visual_perm"].append(
+                structure_retrieval_metric(z0, visual_perm)
+            )
+            values["audit_strret_post_vs_visual_perm"].append(
+                structure_retrieval_metric(post_text, visual_perm)
+            )
+
+            C_post = pairwise_cosine_distance(post_text)
+            C_visual = pairwise_cosine_distance(visual)
+            values["audit_fixed_gw_obj_z0"].append(block["gw_init_obj"].to(C_post.device).float())
+            values["audit_current_gw_obj_fixed_perm"].append(
+                hard_gw_struct_objective(C_post, C_visual, perm).detach()
             )
 
         out: Dict[str, torch.Tensor] = {}
@@ -762,6 +799,12 @@ class Stage3GWLoss(nn.Module):
             stacked = torch.stack([v.to(device).float() for v in vals])
             finite = torch.isfinite(stacked)
             out[key] = stacked[finite].mean() if finite.any() else torch.tensor(float("nan"), device=device)
+
+        # Backward-compatible aliases used by old logging scripts.
+        out["audit_spear_pre_text_vs_visual"] = out["audit_spear_z0_vs_visual"]
+        out["audit_spear_post_text_vs_visual"] = out["audit_spear_post_vs_visual"]
+        out["audit_strret_pre_text_vs_visual"] = out["audit_strret_z0_vs_visual"]
+        out["audit_strret_post_text_vs_visual"] = out["audit_strret_post_vs_visual"]
         return out
 
     @torch.no_grad()

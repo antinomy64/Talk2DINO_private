@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.dataset_joint_with_part_anchoraudit import joint_collate_fn
-from src.loss_stage3_gw import (
+from src.loss_gw import (
     Stage3GWLoss,
     build_class_part_blocks_from_dataset,
     build_stage2_visual_prototypes,
@@ -377,7 +377,7 @@ def _infer_num_parts(train_dataset) -> int:
     return max_pid + 1
 
 
-def do_train_stage3_gw(
+def do_train_gw(
     model,
     train_dataset,
     val_dataset,
